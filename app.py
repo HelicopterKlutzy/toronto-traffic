@@ -1,52 +1,88 @@
 import streamlit as st
 import pandas as pd
-import requests
+import plotly.express as px
 
+# 1. Page Configuration
+st.set_page_config(page_title="Toronto Traffic Comparison", layout="wide")
+st.title("🚦 Toronto Traffic Intersection Comparison")
+st.markdown("Comparing **Vehicle** and **Pedestrian** volumes using Toronto Open Data.")
+
+# 2. Robust Data Loading
 @st.cache_data
-def load_data_safe():
-    # Package ID for Turning Movement Counts
-    package_id = "traffic-volumes-at-intersections-for-all-modes"
-    base_url = f"https://ckan0.cf.opendata.inter.prod-toronto.ca{package_id}"
+def load_traffic_data():
+    # Direct CSV download link from Toronto Open Data (TMC Summary Data)
+    # This avoids the "Line 1 Column 1" JSON error
+    csv_url = "https://ckan0.cf.opendata.inter.prod-toronto.ca"
     
     try:
-        response = requests.get(base_url)
-        # Check if the server actually returned a success code
-        if response.status_code != 200:
-            st.error(f"API Error: Server returned status {response.status_code}")
-            return pd.DataFrame()
-            
-        data = response.json()
+        # load_memory=False handles large datasets with mixed data types better
+        df = pd.read_csv(csv_url, low_memory=False)
         
-        # Find the 'TMC Summary Data' resource
-        resource_id = None
-        for resource in data["result"]["resources"]:
-            if "summary" in resource["name"].lower() and resource["format"].lower() == "csv":
-                resource_id = resource["id"]
-                break
+        # Data Cleaning
+        df['count_date'] = pd.to_datetime(df['count_date'], errors='coerce')
+        df = df.dropna(subset=['count_date']) # Remove rows with invalid dates
+        df['year'] = df['count_date'].dt.year.astype(int)
         
-        if not resource_id:
-            st.error("Could not find the summary CSV in the dataset metadata.")
-            return pd.DataFrame()
-
-        # Direct CSV download bypasses JSON parsing errors for large files
-        csv_url = f"https://ckan0.cf.opendata.inter.prod-toronto.ca{resource_id}"
-        df = pd.read_csv(csv_url)
+        # Identify intersection name (using 'main' street and 'cross' street)
+        df['intersection'] = df['main'] + " & " + df['cross_st']
         
-        # Basic cleaning
-        df['count_date'] = pd.to_datetime(df['count_date'])
-        df['year'] = df['count_date'].dt.year
         return df
-
-    except requests.exceptions.JSONDecodeError:
-        st.error("The API returned an empty or invalid response (likely an HTML error page).")
-        return pd.DataFrame()
     except Exception as e:
-        st.error(f"Unexpected error: {e}")
+        st.error(f"Error loading data: {e}")
         return pd.DataFrame()
 
-# Use the function
-df = load_data_safe()
+# 3. App Logic
+df = load_traffic_data()
+
 if not df.empty:
-    st.write("Data loaded successfully!")
-    st.dataframe(df.head())
+    # Sidebar: Intersections
+    st.sidebar.header("Filters")
+    all_intersections = sorted(df['intersection'].unique())
+    selected_intersections = st.sidebar.multiselect(
+        "Select Intersections", 
+        options=all_intersections,
+        default=all_intersections[:2]
+    )
+
+    # Sidebar: Years
+    min_year, max_year = int(df['year'].min()), int(df['year'].max())
+    year_range = st.sidebar.slider("Select Year Range", min_year, max_year, (min_year, max_year))
+
+    # Filter Data
+    mask = (df['intersection'].isin(selected_intersections)) & \
+           (df['year'] >= year_range[0]) & (df['year'] <= year_range[1])
+    filtered_df = df[mask]
+
+    if not filtered_df.empty:
+        # Group data for plotting
+        # v_tot = vehicles, p_tot = pedestrians
+        grouped = filtered_df.groupby(['year', 'intersection'])[['v_tot', 'p_tot']].sum().reset_index()
+
+        # Tabs for different views
+        tab1, tab2 = st.tabs(["🚗 Total Traffic", "🚶 Pedestrians vs Vehicles"])
+
+        with tab1:
+            fig1 = px.line(grouped, x='year', y='v_tot', color='intersection', markers=True,
+                          labels={'v_tot': 'Vehicle Volume', 'year': 'Year'},
+                          title="Annual Vehicle Trends")
+            st.plotly_chart(fig1, use_container_width=True)
+
+        with tab2:
+            # Melt data for comparison bars
+            melted = grouped.melt(id_vars=['year', 'intersection'], 
+                                  value_vars=['v_tot', 'p_tot'],
+                                  var_name='Type', value_name='Volume')
+            melted['Type'] = melted['Type'].map({'v_tot': 'Vehicles', 'p_tot': 'Pedestrians'})
+            
+            fig2 = px.bar(melted, x='year', y='Volume', color='Type', barmode='group',
+                         facet_col='intersection', facet_col_wrap=2,
+                         title="Pedestrian vs. Vehicle Breakdown")
+            st.plotly_chart(fig2, use_container_width=True)
+            
+        with st.expander("View Raw Data"):
+            st.dataframe(filtered_df)
+    else:
+        st.info("Select intersections and years from the sidebar to begin.")
+else:
+    st.error("Failed to load data from Toronto Open Data. Please check your connection.")
     
