@@ -9,31 +9,33 @@ st.set_page_config(page_title="Toronto Traffic Scope", layout="wide", page_icon=
 
 st.markdown("""
     <style>
-    .main-title { font-size: 38px; font-weight: bold; color: #E31837; }
-    .subtitle { font-size: 18px; color: #555; }
+    .main-title { font-size: 32px; font-weight: bold; color: #E31837; }
+    .subtitle { font-size: 16px; color: #555; margin-bottom: 20px;}
     </style>
     """, unsafe_allow_html=True)
 
 st.markdown('<p class="main-title">🍁 Toronto Traffic Data Dashboard</p>', unsafe_allow_html=True)
-st.markdown('<p class="subtitle">Official Traffic Volumes & Live Road Restrictions</p>', unsafe_allow_html=True)
+st.markdown('<p class="subtitle">Visualizing official City of Toronto traffic volumes and road restrictions.</p>', unsafe_allow_html=True)
 
-# --- 2. DATA FETCHING ---
-@st.cache_data
-def get_traffic_volumes():
+# --- 2. ROBUST DATA LOADING ---
+@st.cache_data(ttl=3600)
+def get_traffic_data():
+    """Fetches traffic volume data with a guaranteed demo fallback."""
     try:
-        # Stable City of Toronto CSV link
         url = "https://ckan0.cf.opendata.inter.prod-toronto.ca"
         df = pd.read_csv(url)
-        return clean_volume_data(df)
+        return clean_data(df)
     except:
-        # Demo Fallback
-        data = """counting_date,main_street,side_1_street,8hr_vehicle_volume,lat,lng,ward_name
-        2024-05-20,YONGE ST,DUNDAS ST,28000,43.6561,-79.3802,Toronto Centre
-        2024-06-01,LAKE SHORE BLVD,BATHURST ST,35000,43.6356,-79.3995,Spadina-Fort York
+        # Emergency Demo Data
+        data = """counting_date,main_street,side_1_street,8hr_vehicle_volume,lat,lng
+        2024-05-20,YONGE ST,DUNDAS ST,28500,43.6561,-79.3802
+        2024-06-01,LAKE SHORE BLVD,BATHURST ST,34000,43.6356,-79.3995
+        2024-06-15,BLOOR ST,SPADINA AVE,22000,43.6662,-79.4032
         """
-        return clean_volume_data(pd.read_csv(io.StringIO(data)))
+        return clean_data(pd.read_csv(io.StringIO(data)))
 
-def clean_volume_data(df):
+def clean_data(df):
+    """Fixes coordinates and standardizes columns."""
     df = df.rename(columns={'latitude': 'lat', 'Latitude': 'lat', 'longitude': 'lng', 'Longitude': 'lng'})
     if '8hr_vehicle_volume' not in df.columns:
         vol_cols = [c for c in df.columns if 'volume' in c.lower()]
@@ -41,48 +43,56 @@ def clean_volume_data(df):
     df['counting_date'] = pd.to_datetime(df['counting_date'], errors='coerce')
     return df.dropna(subset=['lat', 'lng'])
 
-# --- 3. SIDEBAR ---
-view_option = st.sidebar.radio("View:", ["Intersection Volumes", "Live Road Restrictions"])
-df_vol = get_traffic_volumes()
+# --- 3. SIDEBAR & FILTERS ---
+view = st.sidebar.radio("Navigation:", ["Traffic Volumes", "Road Restrictions"])
+df = get_traffic_data()
 
-if view_option == "Intersection Volumes":
-    st.sidebar.subheader("🔍 Filters")
-    search_query = st.sidebar.text_input("Street Search:", "").upper()
+if view == "Traffic Volumes":
+    st.sidebar.subheader("Map Filters")
+    query = st.sidebar.text_input("Search Street:", "").upper()
+    min_vol = st.sidebar.slider("Min Volume:", 0, 25000, 5000)
     
     # Filter Logic
-    mask = (df_vol['8hr_vehicle_volume'] >= st.sidebar.slider("Min Volume", 0, 20000, 5000))
-    if search_query:
-        mask &= (df_vol['main_street'].str.contains(search_query, na=False))
-    filtered = df_vol[mask]
+    mask = (df['8hr_vehicle_volume'] >= min_vol)
+    if query:
+        mask &= (df['main_street'].str.contains(query, na=False) | df['side_1_street'].str.contains(query, na=False))
+    filtered_df = df[mask]
 
-    # --- 4. MAP (FIXED) ---
-    # Attempt to get token from Secrets; fallback to None
-    mapbox_token = st.secrets.get("MAPBOX_TOKEN", None)
+    # --- 4. MAP RENDERING ---
+    st.subheader(f"🚦 Intersection Analysis ({len(filtered_df)} results)")
     
-    st.pydeck_chart(pdk.Deck(
-        map_style='mapbox://styles/mapbox/streets-v11' if mapbox_token else 'light',
-        api_keys={'mapbox': mapbox_token} if mapbox_token else None,
-        initial_view_state=pdk.ViewState(latitude=43.6532, longitude=-79.3832, zoom=12, pitch=45),
-        layers=[
-            pdk.Layer(
-                'ColumnLayer',
-                data=filtered,
-                get_position='[lng, lat]',
-                get_elevation='8hr_vehicle_volume',
-                elevation_scale=0.1,
-                radius=80,
-                get_fill_color=[227, 24, 55, 200], # Explicit RGBA list
-                pickable=True,
-            ),
-        ],
-        tooltip={"text": "{main_street} & {side_1_street}\nVol: {8hr_vehicle_volume}"}
-    ))
+    try:
+        st.pydeck_chart(pdk.Deck(
+            map_style='mapbox://styles/mapbox/light-v9', # No token required for basic styles
+            initial_view_state=pdk.ViewState(latitude=43.6532, longitude=-79.3832, zoom=12, pitch=45),
+            layers=[
+                pdk.Layer(
+                    'ColumnLayer',
+                    data=filtered_df,
+                    get_position='[lng, lat]',
+                    get_elevation='8hr_vehicle_volume',
+                    elevation_scale=0.1,
+                    radius=80,
+                    get_fill_color=[227, 24, 55, 200], # Toronto Red
+                    pickable=True,
+                ),
+            ],
+            tooltip={"text": "{main_street} & {side_1_street}\nVolume: {8hr_vehicle_volume}"}
+        ))
+    except Exception as e:
+        st.error(f"Map Error: {e}. Try refreshing the page.")
 
-elif view_option == "Live Road Restrictions":
-    st.subheader("🚧 Live Road Notices")
+    st.dataframe(filtered_df.sort_values('8hr_vehicle_volume', ascending=False), use_container_width=True)
+
+elif view == "Road Restrictions":
+    st.subheader("🚧 Live Toronto Road Notices")
     try:
         r = requests.get("https://app.toronto.ca", timeout=10)
-        st.dataframe(pd.DataFrame(r.json().get('notices', [])))
+        notices = pd.DataFrame(r.json().get('notices', []))
+        if not notices.empty:
+            st.dataframe(notices[['road', 'description', 'severity']], use_container_width=True)
+        else:
+            st.success("No active road restrictions.")
     except:
-        st.error("Could not load live data.")
+        st.warning("Live data currently unavailable.")
     
