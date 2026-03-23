@@ -11,43 +11,72 @@ st.markdown("Digitally visualize official traffic reports and road restrictions 
 # --- DATA FETCHING FUNCTIONS ---
 @st.cache_data
 def get_traffic_volumes():
-    """Fetches the most recent Traffic Volume Summary from Toronto Open Data."""
-    # 1. Get Package Metadata to find the CSV URL
-    base_url = "https://ckan0.cf.opendata.inter.prod-toronto.ca"
+    """Fetches the most recent Traffic Volume Summary with robust error handling."""
+    # 1. Use the public production API URL (more stable)
+    base_url = "https://open.toronto.ca"
     package_id = "traffic-volumes-at-intersections-for-all-modes"
     
     try:
         # Fetch package metadata
         url = f"{base_url}/package_show"
         params = {"id": package_id}
-        response = requests.get(url, params=params).json()
         
-        # Find the resource for 'Most Recent Summary Data'
-        resources = response["result"]["resources"]
+        # Add a User-Agent to avoid being blocked
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        r = requests.get(url, params=params, headers=headers)
+        
+        # Check if the request was actually successful
+        if r.status_code != 200:
+            st.error(f"API Error: Status {r.status_code}")
+            return None
+
+        data = r.json()
+        
+        # 2. Smart Resource Finder
+        resources = data["result"]["resources"]
         resource_url = None
+        
+        # Priority 1: Look for 'most recent summary'
         for res in resources:
-            if "most_recent_summary" in res["name"].lower() and res["format"].lower() == "csv":
+            if "most recent summary" in res["name"].lower() and res["format"].lower() == "csv":
                 resource_url = res["url"]
                 break
         
+        # Priority 2: Fallback to ANY csv if specific one is missing
         if not resource_url:
-            st.error("Could not locate the specific traffic volume CSV.")
+            for res in resources:
+                if res["format"].lower() == "csv":
+                    resource_url = res["url"]
+                    break
+
+        if not resource_url:
+            st.error("Could not locate a CSV file in the dataset.")
             return None
             
-        # 2. Load the CSV Data
-        df = pd.read_csv(resource_url)
+        # 3. Load the Data
+        # 'on_bad_lines' skips malformed rows which can crash the app
+        df = pd.read_csv(resource_url, on_bad_lines='skip')
         
-        # Clean/Rename columns for mapping if necessary (ensure lat/lon exist)
-        # The dataset typically uses 'lat' and 'lng' or similar. 
-        # We'll drop rows with missing coordinates.
+        # 4. Standardize Coordinate Columns (Lat/Lon vs Lng/Lat)
+        # Map common variations to standard 'lat' and 'lng'
+        col_map = {
+            'latitude': 'lat', 'Latitude': 'lat',
+            'longitude': 'lng', 'Longitude': 'lng'
+        }
+        df = df.rename(columns=col_map)
+        
         if 'lat' in df.columns and 'lng' in df.columns:
             df = df.dropna(subset=['lat', 'lng'])
-        
+        else:
+            st.error("Data found, but it's missing GPS coordinates (lat/lng).")
+            return None
+            
         return df
         
     except Exception as e:
-        st.error(f"Error fetching Traffic Volume data: {e}")
+        st.error(f"Connection Error: {e}")
         return None
+
 
 @st.cache_data
 def get_road_restrictions():
