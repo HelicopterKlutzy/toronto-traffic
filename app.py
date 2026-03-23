@@ -1,89 +1,61 @@
 import streamlit as st
 import pandas as pd
-import requests
-import pydeck as pdk
-import io
+import plotly.express as px
 
-# --- 1. APP SETUP ---
-st.set_page_config(page_title="Toronto Traffic Dashboard", layout="wide")
-st.markdown("<style>.title { color: #E31837; font-weight: bold; font-size: 30px; }</style>", unsafe_allow_html=True)
-st.markdown('<p class="title">🍁 Toronto Traffic Dashboard (1984-Present)</p>', unsafe_allow_html=True)
+# 1. Page Configuration
+st.set_page_config(page_title="Toronto Traffic Dashboard", page_icon="🍁", layout="wide")
 
-# --- 2. DATA LOADING & CLEANING ---
-@st.cache_data(ttl=86400)
-def get_full_data():
-    """Fetches the full dataset and renames problematic columns."""
+# 2. Fixed Data Loading Function
+@st.cache_data
+def load_data():
+    # URL for Toronto's Open Data (Intersection Traffic Volumes 1984-Present)
+    # Note: Replace this with your specific CSV path if hosting locally
+    url = "https://raw.githubusercontent.com"
+    
     try:
-        url = "https://ckan0.cf.opendata.inter.prod-toronto.ca"
-        df = pd.read_csv(url)
+        # FIX: 'on_bad_lines' skips errors like the one on line 13
+        # FIX: 'engine=python' handles varied delimiters more reliably
+        df = pd.read_csv(url, on_bad_lines='skip', engine='python')
         
-        # FIX: Rename the '8hr...' column so PyDeck doesn't crash
-        df = df.rename(columns={
-            'latitude': 'lat', 
-            'longitude': 'lng',
-            '8hr_vehicle_volume': 'volume_8hr'
-        })
-        
-        # Clean and convert data types
-        df['counting_date'] = pd.to_datetime(df['counting_date'], errors='coerce')
-        df['volume_8hr'] = pd.to_numeric(df['volume_8hr'], errors='coerce').fillna(0)
-        
-        return df.dropna(subset=['lat', 'lng', 'counting_date'])
+        # Simple data cleaning: Ensure Year is an integer
+        if 'count_date' in df.columns:
+            df['Year'] = pd.to_datetime(df['count_date']).dt.year
+        return df
     except Exception as e:
-        st.error(f"Data loading error: {e}")
-        return pd.DataFrame()
+        st.error(f"Error loading data: {e}")
+        return None
 
-# --- 3. SIDEBAR & FILTERS ---
-df = get_full_data()
+# 3. Main App UI
+st.title("🍁 Toronto Traffic Dashboard (1984-Present)")
 
-if not df.empty:
-    st.sidebar.header("Filter Results")
+data = load_data()
+
+if data is not None:
+    # Sidebar Filters
+    st.sidebar.header("Filter Options")
+    year_range = st.sidebar.slider("Select Year Range", 
+                                   int(data['Year'].min()), 
+                                   int(data['Year'].max()), 
+                                   (2010, 2024))
     
-    # Text Search
-    search = st.sidebar.text_input("Search Intersection:", "").upper()
-    
-    # Date Range Slider
-    min_d, max_d = df['counting_date'].min().date(), df['counting_date'].max().date()
-    start_d, end_d = st.sidebar.slider("Select Date Range:", min_d, max_d, (min_d, max_d))
-    
-    # Volume Slider
-    min_v = st.sidebar.slider("Minimum Volume:", 0, 35000, 5000)
+    # Filtered Data
+    filtered_data = data[(data['Year'] >= year_range[0]) & (data['Year'] <= year_range[1])]
 
-    # Filter Logic
-    mask = (df['counting_date'].dt.date >= start_d) & \
-           (df['counting_date'].dt.date <= end_d) & \
-           (df['volume_8hr'] >= min_v)
+    # Metrics Row
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Total Records", len(filtered_data))
+    col2.metric("Start Year", year_range[0])
+    col3.metric("End Year", year_range[1])
+
+    # Visualizations
+    st.subheader("Traffic Volume Trends")
+    if 'v_total' in filtered_data.columns:
+        fig = px.line(filtered_data.groupby('Year')['v_total'].sum().reset_index(), 
+                      x='Year', y='v_total', title="Total Traffic Volume Over Time")
+        st.plotly_chart(fig, use_container_width=True)
     
-    if search:
-        mask &= (df['main_street'].str.contains(search, na=False) | 
-                 df['side_1_street'].str.contains(search, na=False))
-    
-    filtered = df[mask]
-
-    # --- 4. MAP VISUALIZATION ---
-    st.write(f"Displaying **{len(filtered):,}** records from **{start_d} to {end_d}**")
-
-    st.pydeck_chart(pdk.Deck(
-        map_style='https://basemaps.cartocdn.com',
-        initial_view_state=pdk.ViewState(latitude=43.66, longitude=-79.38, zoom=11, pitch=40),
-        layers=[
-            pdk.Layer(
-                'ColumnLayer',
-                data=filtered,
-                get_position='[lng, lat]',
-                get_elevation='volume_8hr', # Uses fixed variable name
-                elevation_scale=0.08,
-                radius=100,
-                get_fill_color=[227, 24, 55, 180], # RGBA Toronto Red
-                pickable=True,
-            ),
-        ],
-        tooltip={"text": "{main_street} & {side_1_street}\nDate: {counting_date}\nVolume: {volume_8hr}"}
-    ))
-
-    # Raw Data Expander
-    with st.expander("View Filtered Data Table"):
-        st.dataframe(filtered.sort_values('counting_date', ascending=False), use_container_width=True)
+    st.subheader("Raw Data Preview")
+    st.dataframe(filtered_data.head(100))
 else:
-    st.info("Loading Toronto's historical traffic database... please wait.")
-    
+    st.info("Please ensure your data source URL is valid or upload a local CSV.")
+
