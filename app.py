@@ -13,11 +13,10 @@ def load_traffic_data():
     csv_url = "https://ckan0.cf.opendata.inter.prod-toronto.ca"
     
     try:
-        # FIX: on_bad_lines='skip' ignores the malformed lines that caused your error
-        # engine='python' is more robust for files with inconsistent formatting
+        # Removed low_memory=False to fix the 'python' engine conflict
         df = pd.read_csv(
             csv_url, 
-            low_memory=False, 
+            sep=',',
             on_bad_lines='skip', 
             engine='python'
         )
@@ -26,7 +25,9 @@ def load_traffic_data():
         df['count_date'] = pd.to_datetime(df['count_date'], errors='coerce')
         df = df.dropna(subset=['count_date'])
         df['year'] = df['count_date'].dt.year.astype(int)
-        df['intersection'] = df['main'].fillna('') + " & " + df['cross_st'].fillna('')
+        
+        # Combine street names for a clean label
+        df['intersection'] = df['main'].fillna('Unknown') + " & " + df['cross_st'].fillna('Unknown')
         
         return df
     except Exception as e:
@@ -44,18 +45,16 @@ if not df.empty:
     selected_intersections = st.sidebar.multiselect(
         "Select Intersections", 
         options=all_intersections,
-        default=all_intersections[:1]
+        default=all_intersections[:2] if len(all_intersections) > 1 else all_intersections
     )
 
     min_year, max_year = int(df['year'].min()), int(df['year'].max())
     year_range = st.sidebar.slider("Select Year Range", min_year, max_year, (min_year, max_year))
 
     # Filtered Data
-    filtered_df = df[
-        (df['intersection'].isin(selected_intersections)) & 
-        (df['year'] >= year_range[0]) & 
-        (df['year'] <= year_range[1])
-    ]
+    mask = (df['intersection'].isin(selected_intersections)) & \
+           (df['year'] >= year_range[0]) & (df['year'] <= year_range[1])
+    filtered_df = df[mask]
 
     if not filtered_df.empty:
         # Aggregate totals (v_tot = vehicles, p_tot = pedestrians)
@@ -65,6 +64,7 @@ if not df.empty:
 
         with tab1:
             fig1 = px.line(grouped, x='year', y='v_tot', color='intersection', markers=True,
+                          labels={'v_tot': 'Total Vehicles', 'year': 'Year'},
                           title="Annual Vehicle Traffic Trends")
             st.plotly_chart(fig1, use_container_width=True)
 
@@ -75,10 +75,14 @@ if not df.empty:
             melted['Type'] = melted['Type'].replace({'v_tot': 'Vehicles', 'p_tot': 'Pedestrians'})
             
             fig2 = px.bar(melted, x='year', y='Volume', color='Type', barmode='group',
-                         facet_col='intersection', title="Volume Breakdown")
+                         facet_col='intersection', facet_col_wrap=2,
+                         title="Volume Breakdown")
             st.plotly_chart(fig2, use_container_width=True)
+            
+        with st.expander("View Data Table"):
+            st.dataframe(filtered_df)
     else:
-        st.info("No data found for the selected filters.")
+        st.info("No data found for the selected filters. Please adjust the sidebar.")
 else:
-    st.error("Could not load data. The source file may be temporarily unavailable.")
+    st.error("Data could not be loaded. Please check the logs for more details.")
     
