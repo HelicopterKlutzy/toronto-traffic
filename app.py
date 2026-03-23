@@ -2,60 +2,71 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 
-# 1. Page Configuration
-st.set_page_config(page_title="Toronto Traffic Dashboard", page_icon="🍁", layout="wide")
+# 1. Setup Page
+st.set_page_config(page_title="Toronto Traffic: Pedestrians vs Vehicles", layout="wide")
+st.title("🚦 Toronto Traffic: Pedestrians vs. Vehicles")
 
-# 2. Fixed Data Loading Function
 @st.cache_data
 def load_data():
-    # URL for Toronto's Open Data (Intersection Traffic Volumes 1984-Present)
-    # Note: Replace this with your specific CSV path if hosting locally
-    url = "https://raw.githubusercontent.com"
+    # Use the 'tmc_summary_data.csv' from Toronto Open Data
+    df = pd.read_csv('tmc_summary_data.csv')
+    df['count_date'] = pd.to_datetime(df['count_date'])
+    df['year'] = df['count_date'].dt.year
+    return df
+
+try:
+    df = load_data()
+
+    # 2. Sidebar Filters
+    st.sidebar.header("Comparison Settings")
     
-    try:
-        # FIX: 'on_bad_lines' skips errors like the one on line 13
-        # FIX: 'engine=python' handles varied delimiters more reliably
-        df = pd.read_csv(url, on_bad_lines='skip', engine='python')
+    # Mode Selection
+    view_mode = st.sidebar.radio("Select View:", ["Total Traffic", "Pedestrians vs. Vehicles"])
+
+    # Intersection Selection
+    all_intersections = sorted(df['main'].unique())
+    selected_intersections = st.sidebar.multiselect(
+        "Select Intersections", 
+        options=all_intersections,
+        default=all_intersections[:1] # Start with one for clarity
+    )
+
+    # 3. Data Filtering & Reshaping
+    filtered_df = df[df['main'].isin(selected_intersections)]
+    
+    if view_mode == "Total Traffic":
+        # Standard trend chart
+        chart_data = filtered_df.groupby(['year', 'main'])['v_tot'].sum().reset_index()
+        fig = px.line(chart_data, x='year', y='v_tot', color='main', title="Total Annual Volume")
+    
+    else:
+        # Reshape data for Pedestrian vs Vehicle comparison
+        # v_tot = vehicle total, p_tot = pedestrian total
+        comp_df = filtered_df.groupby(['year', 'main'])[['v_tot', 'p_tot']].sum().reset_index()
         
-        # Simple data cleaning: Ensure Year is an integer
-        if 'count_date' in df.columns:
-            df['Year'] = pd.to_datetime(df['count_date']).dt.year
-        return df
-    except Exception as e:
-        st.error(f"Error loading data: {e}")
-        return None
+        # Melting the data makes it easier for Plotly to color-code by "Type"
+        melted_df = comp_df.melt(
+            id_vars=['year', 'main'], 
+            value_vars=['v_tot', 'p_tot'],
+            var_name='Traffic Type', 
+            value_name='Volume'
+        )
+        # Rename for readability
+        melted_df['Traffic Type'] = melted_df['Traffic Type'].map({'v_tot': 'Vehicles', 'p_tot': 'Pedestrians'})
+        
+        fig = px.bar(
+            melted_df, 
+            x='year', 
+            y='Volume', 
+            color='Traffic Type',
+            barmode='group', # Side-by-side bars
+            facet_col='main', # Separate chart for each intersection if multiple selected
+            title="Pedestrians vs. Vehicles Comparison"
+        )
 
-# 3. Main App UI
-st.title("🍁 Toronto Traffic Dashboard (1984-Present)")
+    # 4. Display Chart
+    st.plotly_chart(fig, use_container_width=True)
 
-data = load_data()
-
-if data is not None:
-    # Sidebar Filters
-    st.sidebar.header("Filter Options")
-    year_range = st.sidebar.slider("Select Year Range", 
-                                   int(data['Year'].min()), 
-                                   int(data['Year'].max()), 
-                                   (2010, 2024))
+except Exception as e:
+    st.error(f"Error loading or processing data: {e}")
     
-    # Filtered Data
-    filtered_data = data[(data['Year'] >= year_range[0]) & (data['Year'] <= year_range[1])]
-
-    # Metrics Row
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Total Records", len(filtered_data))
-    col2.metric("Start Year", year_range[0])
-    col3.metric("End Year", year_range[1])
-
-    # Visualizations
-    st.subheader("Traffic Volume Trends")
-    if 'v_total' in filtered_data.columns:
-        fig = px.line(filtered_data.groupby('Year')['v_total'].sum().reset_index(), 
-                      x='Year', y='v_total', title="Total Traffic Volume Over Time")
-        st.plotly_chart(fig, use_container_width=True)
-    
-    st.subheader("Raw Data Preview")
-    st.dataframe(filtered_data.head(100))
-else:
-    st.info("Please ensure your data source URL is valid or upload a local CSV.")
-
