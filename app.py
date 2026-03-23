@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import requests
 import pydeck as pdk
-import re
+import io
 
 # --- APP CONFIGURATION ---
 st.set_page_config(page_title="Toronto Traffic Scope", layout="wide", page_icon="🍁")
@@ -13,168 +13,138 @@ st.markdown("Digitally visualize official traffic reports and road restrictions 
 @st.cache_data
 def get_traffic_volumes():
     """
-    Fetches traffic data with a 'Double-Barrel' strategy to prevent 404 errors.
-    Strategy 1: Direct API (ckan0)
-    Strategy 2: Web Scrape (open.toronto.ca)
+    Triple-Safe Strategy:
+    1. Try Direct API (Best for freshness)
+    2. Try Hardcoded Direct Link (Bypasses search blocks)
+    3. Fallback to Sample Data (Ensures app never crashes)
     """
-    status_placeholder = st.empty()
-    status_placeholder.info("Attempting to connect to City Data Services...")
-
-    # --- STRATEGY 1: DIRECT API ACCESS ---
-    api_url = "https://ckan0.cf.opendata.inter.prod-toronto.ca"
-    params = {"id": "traffic-volumes-at-intersections-for-all-modes"}
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
-
-    csv_url = None
-
+    status = st.empty()
+    
+    # --- STRATEGY 1: DIRECT API (Often blocked on Cloud) ---
+    status.info("Trying to connect to City Database...")
     try:
-        r = requests.get(api_url, params=params, headers=headers, timeout=10)
+        api_url = "https://ckan0.cf.opendata.inter.prod-toronto.ca"
+        params = {"id": "traffic-volumes-at-intersections-for-all-modes"}
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
+        
+        r = requests.get(api_url, params=params, headers=headers, timeout=5)
         if r.status_code == 200:
-            data = r.json()
-            resources = data["result"]["resources"]
+            resources = r.json()["result"]["resources"]
             for res in resources:
                 if "most_recent_summary" in res["name"].lower() and res["format"].lower() == "csv":
-                    csv_url = res["url"]
-                    break
-    except Exception:
-        pass 
-
-    # --- STRATEGY 2: WEB SCRAPE (FALLBACK) ---
-    if not csv_url:
-        status_placeholder.warning("API blocked. Switching to backup scraping method...")
-        try:
-            page_url = "https://open.toronto.ca"
-            r_page = requests.get(page_url, headers=headers, timeout=10)
-            links = re.findall(r'href="(https://ckan0[^"]+)"', r_page.text)
-            for link in links:
-                if "most_recent_summary" in link.lower() or "tmc_most_recent" in link.lower():
-                    csv_url = link
-                    break
-        except Exception as e:
-            st.error(f"Backup method failed: {e}")
-            return None
-
-    # --- LOAD AND CLEAN DATA ---
-    if csv_url:
-        status_placeholder.success(f"Data Source Found! Cleaning records...")
-        try:
-            df = pd.read_csv(csv_url, on_bad_lines='skip')
-            
-            # Standardize Coordinates
-            col_map = {'latitude': 'lat', 'Latitude': 'lat', 'longitude': 'lng', 'Longitude': 'lng'}
-            df = df.rename(columns=col_map)
-            
-            # Convert Date to Real Date Object
-            if 'counting_date' in df.columns:
-                df['counting_date'] = pd.to_datetime(df['counting_date'], errors='coerce')
-                df = df.dropna(subset=['counting_date'])
-                # Sort NEWEST first
-                df = df.sort_values(by='counting_date', ascending=False)
-            
-            # Clean GPS Data
-            if 'lat' in df.columns and 'lng' in df.columns:
-                df = df.dropna(subset=['lat', 'lng'])
-                status_placeholder.empty()
-                return df
-            else:
-                st.error("Data loaded but GPS coordinates are missing.")
-                return None
-        except Exception as e:
-            st.error(f"Failed to read CSV: {e}")
-            return None
-    else:
-        st.error("Could not locate data file. The City may have moved the dataset.")
-        return None
-
-@st.cache_data
-def get_road_restrictions():
-    """Fetches live road restrictions."""
-    url = "https://secure.toronto.ca" 
-    try:
-        response = requests.get(url, timeout=10).json()
-        if 'notices' in response:
-            return pd.DataFrame(response['notices'])
-        return pd.DataFrame()
+                    df = pd.read_csv(res["url"])
+                    status.success("Connected to Live City API!")
+                    return clean_data(df)
     except:
-        return pd.DataFrame()
+        pass
 
-# --- SIDEBAR CONTROLS ---
-st.sidebar.header("App Controls")
-view_option = st.sidebar.radio("Select Report Type:", ["Intersection Volumes", "Live Road Restrictions"])
+    # --- STRATEGY 2: HARDCODED MIRROR (The Fix) ---
+    # This links directly to the file, skipping the "search" step that gets blocked.
+    status.warning("API blocked. Trying direct download link...")
+    try:
+        # This is the known stable link for the summary dataset
+        direct_url = "https://ckan0.cf.opendata.inter.prod-toronto.ca"
+        df = pd.read_csv(direct_url, on_bad_lines='skip')
+        status.success("Loaded via Direct Link.")
+        return clean_data(df)
+    except:
+        pass
+
+    # --- STRATEGY 3: GENERATE SAMPLE DATA (Failsafe) ---
+    status.error("City servers are completely blocking connections. Loading Demo Data.")
+    data = """counting_date,main_street,side_1_street,8hr_vehicle_volume,lat,lng
+    2024-05-20,YONGE ST,DUNDAS ST,25000,43.6561,-79.3802
+    2024-05-21,BLOOR ST,SPADINA AVE,21000,43.6662,-79.4032
+    2024-06-01,LAKE SHORE BLVD,BATHURST ST,32000,43.6356,-79.3995
+    2024-06-15,QUEEN ST,UNIVERSITY AVE,18500,43.6509,-79.3865
+    2024-07-10,EGLINTON AVE,DON MILLS RD,29000,43.7233,-79.3371
+    2024-07-12,SHEPPARD AVE,YONGE ST,27500,43.7615,-79.4109
+    2024-08-05,KING ST,JARVIS ST,15000,43.6504,-79.3718
+    2023-11-20,FRONT ST,BAY ST,19000,43.6467,-79.3792
+    """
+    df = pd.read_csv(io.StringIO(data))
+    return clean_data(df)
+
+def clean_data(df):
+    """Standardizes column names and formats dates."""
+    # Fix coordinates
+    col_map = {'latitude': 'lat', 'Latitude': 'lat', 'longitude': 'lng', 'Longitude': 'lng'}
+    df = df.rename(columns=col_map)
+    
+    # Find volume column (it changes names sometimes)
+    if '8hr_vehicle_volume' not in df.columns:
+        # Find first column with 'volume' in it
+        vol_cols = [c for c in df.columns if 'volume' in c.lower()]
+        if vol_cols:
+            df['8hr_vehicle_volume'] = df[vol_cols[0]]
+        else:
+            df['8hr_vehicle_volume'] = 1000 # Fallback
+
+    # Fix dates
+    if 'counting_date' in df.columns:
+        df['counting_date'] = pd.to_datetime(df['counting_date'], errors='coerce')
+        df = df.sort_values('counting_date', ascending=False)
+    
+    return df.dropna(subset=['lat', 'lng'])
 
 # --- MAIN INTERFACE ---
+view_option = st.sidebar.radio("Select Report:", ["Intersection Volumes", "Live Road Restrictions"])
 
 if view_option == "Intersection Volumes":
-    st.subheader("🚦 Intersection Traffic Volumes (Vehicle Counts)")
+    st.subheader("🚦 Intersection Traffic Volumes")
     
     df_vol = get_traffic_volumes()
     
-    if df_vol is not None and not df_vol.empty:
-        # Dynamic volume column check
-        vol_col = '8hr_vehicle_volume' if '8hr_vehicle_volume' in df_vol.columns else df_vol.select_dtypes(include=['number']).columns[0]
-
-        # --- FILTERS ---
-        st.sidebar.markdown("---")
-        st.sidebar.subheader("Filters")
+    if df_vol is not None:
+        # Filters
+        col1, col2 = st.columns(2)
+        with col1:
+            # Year Slider
+            min_year = int(df_vol['counting_date'].dt.year.min())
+            max_year = int(df_vol['counting_date'].dt.year.max())
+            sel_year = st.slider("Show data from year:", min_year, max_year, min_year)
         
-        # Year Filter (Fixes the 2014 issue)
-        min_year = int(df_vol['counting_date'].dt.year.min())
-        max_year = int(df_vol['counting_date'].dt.year.max())
-        selected_year = st.sidebar.slider("Show data from (Year):", min_year, max_year, 2018)
+        with col2:
+            # Volume Slider
+            max_vol = int(df_vol['8hr_vehicle_volume'].max())
+            min_vol = st.slider("Min Volume:", 0, max_vol, 5000)
 
-        # Volume Filter
-        max_val = int(df_vol[vol_col].max())
-        min_vol = st.sidebar.slider("Minimum Traffic Volume:", 0, max_val, 10000)
-
-        # Apply Filters
-        mask = (df_vol['counting_date'].dt.year >= selected_year) & (df_vol[vol_col] >= min_vol)
-        filtered_df = df_vol[mask]
+        # Apply Filter
+        mask = (df_vol['counting_date'].dt.year >= sel_year) & (df_vol['8hr_vehicle_volume'] >= min_vol)
+        filtered = df_vol[mask]
         
-        # Statistics
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Intersections Shown", len(filtered_df))
-        c2.metric("Newest Record", filtered_df['counting_date'].dt.year.max())
-        c3.metric("Highest Volume", f"{int(filtered_df[vol_col].max()):,}")
+        st.write(f"Showing {len(filtered)} intersections.")
 
-        # --- VISUALIZATION ---
-        if not filtered_df.empty:
-            st.pydeck_chart(pdk.Deck(
-                map_style='mapbox://styles/mapbox/light-v9',
-                initial_view_state=pdk.ViewState(
-                    latitude=43.70, longitude=-79.42, zoom=10.5, pitch=45,
+        # Map
+        st.pydeck_chart(pdk.Deck(
+            map_style='mapbox://styles/mapbox/light-v9',
+            initial_view_state=pdk.ViewState(
+                latitude=43.70, longitude=-79.42, zoom=11, pitch=50,
+            ),
+            layers=[
+                pdk.Layer(
+                    'ColumnLayer',
+                    data=filtered,
+                    get_position='[lng, lat]',
+                    get_elevation='8hr_vehicle_volume',
+                    elevation_scale=0.3,
+                    radius=150,
+                    get_fill_color='[255, 75, 75, 200]',
+                    pickable=True,
+                    auto_highlight=True,
                 ),
-                layers=[
-                    pdk.Layer(
-                        'ColumnLayer',
-                        data=filtered_df,
-                        get_position='[lng, lat]',
-                        get_elevation=vol_col,
-                        elevation_scale=0.4,
-                        radius=120,
-                        get_fill_color='', # Toronto Orange
-                        pickable=True,
-                        auto_highlight=True,
-                    ),
-                ],
-                tooltip={"text": "{main_street} / {side_1_street}\nCounted: {counting_date}\nVolume: " + f"{{{vol_col}}}"}
-            ))
-            
-            st.markdown("### 📊 Raw Data (Sorted by Newest)")
-            display_cols = ['counting_date', 'main_street', 'side_1_street', vol_col]
-            st.dataframe(filtered_df[display_cols].head(100), hide_index=True, use_container_width=True)
-        else:
-            st.warning("No data matches your filters. Try lowering the Year or Volume requirements.")
+            ],
+            tooltip={"text": "{main_street} & {side_1_street}\nVol: {8hr_vehicle_volume}\nDate: {counting_date}"}
+        ))
+        
+        st.dataframe(filtered[['counting_date', 'main_street', 'side_1_street', '8hr_vehicle_volume']].head(50), use_container_width=True)
 
 elif view_option == "Live Road Restrictions":
-    st.subheader("🚧 Live Road Restrictions & Closures")
-    st.info("Showing real-time construction and closure notices.")
-    
-    df_rest = get_road_restrictions()
-    
-    if not df_rest.empty:
-        # Display list of closures
-        display_cols = [col for col in ['road', 'description', 'start_date', 'end_date'] if col in df_rest.columns]
-        st.dataframe(df_rest[display_cols].dropna(), use_container_width=True)
-    else:
-        st.write("No active road restriction data found right now.")
-            
+    st.subheader("🚧 Live Road Closures")
+    try:
+        r = requests.get("https://secure.toronto.ca")
+        df = pd.DataFrame(r.json()['notices'])
+        st.dataframe(df[['road', 'description', 'start_date', 'end_date']])
+    except:
+        st.write("No live notices available.")
+        
